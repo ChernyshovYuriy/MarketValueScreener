@@ -18,6 +18,7 @@ import pytest
 from value_screener import (
     HIGHER_IS_BETTER,
     LOWER_IS_BETTER,
+    display,
     load_tickers,
     percentile_rank,
     score,
@@ -479,4 +480,115 @@ class TestAdvisoryFindings:
         assert lpeg_val > npeg_val, (
             "Same P/E but having a low PEG gives a higher valuation_score — "
             "mature no-growth companies are systematically disadvantaged."
+        )
+
+
+# ---------------------------------------------------------------------------
+# 6. Newly found bugs — tests written before the fix (TDD style)
+# ---------------------------------------------------------------------------
+
+class TestNewFindings:
+    """
+    Tests that FAIL on the current code and PASS after the fixes below are applied.
+    Each one documents a concrete bug with a financial explanation.
+    """
+
+    # --- Negative metric traps -----------------------------------------------
+
+    def test_negative_forward_pe_not_treated_as_cheap(self):
+        """
+        [BUG] pe_forward < 0 means analysts forecast a loss year.
+        Currently it ranks as the *cheapest* forward P/E and inflates valuation_score.
+        Fix: NaN-out non-positive pe_forward before ranking.
+
+        Universe: 5 stocks with pe_forward in [-5, 12, 15, 18, 22].
+        After fix, CHEAP (pe_forward=12, legitimately lowest) should outscore
+        LOSS (pe_forward=-5, expected loss).
+        """
+        loss_yr = mk(ticker="LOSS",  pe_forward=-5.0)
+        cheap_fwd = mk(ticker="CHEAP", pe_forward=12.0)
+        n1 = mk(ticker="N1", pe_forward=15.0)
+        n2 = mk(ticker="N2", pe_forward=18.0)
+        n3 = mk(ticker="N3", pe_forward=22.0)
+        ranked = score(mkdf(loss_yr, cheap_fwd, n1, n2, n3))
+        loss_val  = ranked.loc[ranked["ticker"] == "LOSS",  "valuation_score"].iloc[0]
+        cheap_val = ranked.loc[ranked["ticker"] == "CHEAP", "valuation_score"].iloc[0]
+        assert cheap_val > loss_val, (
+            "pe_forward=-5 (loss year) should not outscore pe_forward=12 on valuation."
+        )
+
+    def test_negative_ev_ebitda_not_treated_as_cheap(self):
+        """
+        [BUG] ev_ebitda < 0 means negative EBITDA — the company is operationally
+        unprofitable. Currently it ranks as the cheapest on EV/EBITDA.
+        Fix: NaN-out non-positive ev_ebitda before ranking.
+        """
+        op_loss = mk(ticker="OPLOSS", ev_ebitda=-10.0)
+        good_ev  = mk(ticker="GOOD",   ev_ebitda=8.0)
+        n1 = mk(ticker="N1", ev_ebitda=12.0)
+        n2 = mk(ticker="N2", ev_ebitda=15.0)
+        n3 = mk(ticker="N3", ev_ebitda=20.0)
+        ranked = score(mkdf(op_loss, good_ev, n1, n2, n3))
+        loss_val = ranked.loc[ranked["ticker"] == "OPLOSS", "valuation_score"].iloc[0]
+        good_val = ranked.loc[ranked["ticker"] == "GOOD",   "valuation_score"].iloc[0]
+        assert good_val > loss_val, (
+            "ev_ebitda=-10 (negative EBITDA) should not outscore ev_ebitda=8 on valuation."
+        )
+
+    def test_negative_peg_not_treated_as_cheap(self):
+        """
+        [BUG] peg < 0 arises when the earnings growth rate is negative (declining
+        earnings). Currently it ranks as the cheapest stock on PEG.
+        Fix: NaN-out non-positive peg before ranking.
+        """
+        declining = mk(ticker="DECL", peg=-2.0)
+        good_peg  = mk(ticker="GOOD", peg=0.8)
+        n1 = mk(ticker="N1", peg=1.2)
+        n2 = mk(ticker="N2", peg=1.8)
+        n3 = mk(ticker="N3", peg=2.5)
+        ranked = score(mkdf(declining, good_peg, n1, n2, n3))
+        decl_val = ranked.loc[ranked["ticker"] == "DECL", "valuation_score"].iloc[0]
+        good_val = ranked.loc[ranked["ticker"] == "GOOD", "valuation_score"].iloc[0]
+        assert good_val > decl_val, (
+            "peg=-2 (declining earnings) should not outscore peg=0.8 on valuation."
+        )
+
+    # --- display() NaN consistency -------------------------------------------
+
+    def test_display_nan_metrics_show_dash_not_raw_nan(self, capsys):
+        """
+        [BUG] display() formats NaN roe/fcf_yield inconsistently with save_html().
+        HTML renders them as '—'; console renders them as 'NaN'.
+        Fix: apply the same lambda-based formatting as save_html() in display().
+        """
+        s = mk(roe=float("nan"), fcf_yield=float("nan"))
+        ranked = score(mkdf(s))
+        display(ranked, top_n=1)
+        out = capsys.readouterr().out
+        assert "—" in out, "NaN metrics should render as '—' in console output"
+        assert "NaN" not in out.split("COMPOSITE")[1], (
+            "Raw 'NaN' should not appear for metric values after the header line"
+        )
+
+    # --- Crash and contract paths ---------------------------------------------
+
+    def test_score_raises_on_no_column_dataframe(self):
+        """
+        [CONTRACT] score() requires a DataFrame with the standard columns.
+        build_dataframe() returns pd.DataFrame() (no columns) when every ticker
+        fetch fails. Calling score() on it raises KeyError on 'pe_trailing'.
+        __main__ must guard: if df.empty → print message and exit before calling score().
+        """
+        with pytest.raises(KeyError):
+            score(pd.DataFrame())
+
+    def test_duplicate_ticker_produces_two_output_rows(self):
+        """
+        [DESIGN] A ticker listed twice in the input file is fetched and scored
+        twice, producing two identical rows in the output. No deduplication occurs.
+        """
+        row = mk(ticker="AAPL")
+        ranked = score(mkdf(row, row))
+        assert len(ranked[ranked["ticker"] == "AAPL"]) == 2, (
+            "Duplicate ticker should appear twice — no deduplication is performed."
         )

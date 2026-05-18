@@ -23,6 +23,7 @@ Usage:
 
 import argparse
 import datetime
+import sys
 import time
 import urllib.request
 import warnings
@@ -146,6 +147,12 @@ def score(df: pd.DataFrame) -> pd.DataFrame:
     df = df[df["debt_to_equity"].fillna(0) < 300]  # not over-levered
     df = df[df["market_cap"].fillna(0) > 1e9]  # >$1B market cap
 
+    # Negative values on lower-is-better metrics signal distress (expected loss,
+    # negative EBITDA, declining earnings), not cheapness. Treat as missing so
+    # they don't inflate a stock's valuation score.
+    for c in ["pe_forward", "ev_ebitda", "peg"]:
+        df[c] = df[c].where(df[c] > 0)
+
     # --- Valuation score (avg percentile across cheap-is-good metrics) ---
     val_cols = ["pe_trailing", "pe_forward", "pb", "ps", "ev_ebitda", "peg"]
     val_ranks = pd.DataFrame({c: percentile_rank(df[c], False) for c in val_cols})
@@ -181,11 +188,11 @@ def display(df: pd.DataFrame, top_n: int = 15):
             "valuation_score", "quality_score", "composite_score"]
     out = df[cols].head(top_n).copy()
 
-    # Pretty formatting
+    # Pretty formatting — consistent with save_html(): missing values as "—"
     for c in ["pe_trailing", "pb", "ev_ebitda", "peg", "debt_to_equity"]:
-        out[c] = out[c].round(2)
+        out[c] = out[c].apply(lambda x: "—" if pd.isna(x) else f"{x:.2f}")
     for c in ["roe", "fcf_yield"]:
-        out[c] = (out[c] * 100).round(2).astype(str) + "%"
+        out[c] = out[c].apply(lambda x: "—" if pd.isna(x) else f"{x * 100:.2f}%")
     for c in ["valuation_score", "quality_score", "composite_score"]:
         out[c] = out[c].round(3)
 
@@ -293,6 +300,10 @@ if __name__ == "__main__":
     print(f"Loaded {len(tickers)} tickers from '{args.url}'.")
     print(f"Fetching data...\n")
     df = build_dataframe(tickers)
+    if df.empty:
+        print("\nNo data retrieved — all ticker fetches failed.")
+        print("Check your ticker list and network connection.")
+        sys.exit(1)
     print(f"\nSuccessfully pulled {len(df)} tickers.")
 
     ranked = score(df)
