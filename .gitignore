@@ -1,2 +1,11 @@
-__pycache__
-.idea
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# IDE
+.idea/
+
+# Script outputs — generated on every run, not source-controlled
+screener_results.csv
+screener_results.html
